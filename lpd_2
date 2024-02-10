@@ -1,0 +1,697 @@
+import hashlib
+import os
+from os import system, name
+from pickle import FALSE
+import re
+import shutil
+import stat
+import geoip2.database
+from models.loginfalhados import Loginfalhados
+from models.servicos import Servicos
+from models.portscanner import PortScanner
+from models.user import User
+from time import sleep
+import stdiomask
+from utils.colors import bcolors
+from utils.rsa import RSACrifra
+import pyfiglet
+import sys
+import socket
+from datetime import datetime
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter, landscape
+import csv
+import matplotlib.pyplot as plt
+from chat.servidor import *
+from chat.cliente import *
+import base64
+
+
+def autenticacao(username, password):
+    novoPasswordHash = hashlib.sha256(password.encode('utf-8')).hexdigest() 
+    user = User()
+    res = user.auth(username,novoPasswordHash)
+    if res is None:
+        return 0
+    else:
+        return res
+
+def loginOuRegistar():
+    print('\n-----------------------------------------------------')
+    print("[1] LOGIN")
+    print("[2] REGISTAR")
+    
+    op = input(f"\n{bcolors.BOLD}>>> {bcolors.ENDC}")    
+    if op == '1':
+        login()
+    elif op == '2' : 
+        registar()
+    else:
+        print("\nOpção Invalida\n")
+        loginOuRegistar()
+        
+
+def login():
+    print("\n-------------------- << LOGIN >> --------------------")
+    username = input("Nome utilizador: ")
+    password = stdiomask.getpass()
+    user = autenticacao(username,password)
+    i = 1
+    if user != 0:
+        registarLogs("sucesso",user[1],"login","autenticação feita")
+        menuPrincipal(user)
+    else:
+        print(f"{bcolors.FAIL}Autenticação invalida! \nUtilizador não encontrado{bcolors.ENDC}")
+        registarLogs("erro",username,"login","autenticação falhada")
+        login()
+       
+        
+def registar():
+    print("\n------------------- << REGISTAR >> -------------------")
+    username = input("Nome utilizador: ")
+    password = stdiomask.getpass()
+    passwordConfirmar = stdiomask.getpass(prompt='Confirmar Password: ')
+
+    if password == passwordConfirmar:
+        localPrivKey = input('Localizção onde a chave privada será guardada: ')
+        
+        print ("\nProcessando, Por favor aguarde...")
+    
+        #gerar par de chaves com o algoritmo de Cifra RSA
+        rsa = RSACrifra()
+        
+        #chave publica
+        pubKey = rsa.chavePublica()
+        pubKeyPEM = pubKey.exportKey()
+        
+        #chave privada
+        privKeyPEM = rsa.chavePrivada()
+        
+        #gerar o digest da password atraves da função hash
+        passwordHash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+        
+        #inserir o utilizador na base de dados
+        user = User(username,passwordHash,'','normal')
+        insert = user.insert()
+        if insert != 0:
+            if not os.path.exists(os.path.join(os.path.join(os.path.expanduser('~')),localPrivKey)):
+              os.makedirs(os.path.join(os.path.join(os.path.expanduser('~')),localPrivKey))
+   
+              #guarda a chave publica no servidor
+              rsa.guardarChavePEM(pubKeyPEM,pathApp('chavespublicas/'+username+'_pUK'))
+              
+              #guarda a chave privada num ficheiro
+              rsa.guardarChavePEM(privKeyPEM,localPrivKey+'/privKey')
+              
+              print(f"\n{bcolors.OKGREEN}Utilizador registado com sucesso{bcolors.ENDC} \n")
+              print("Par de chaves gerada\n")
+              print(f"{bcolors.BOLD}Chave Privada: {localPrivKey}/privKey.pem {bcolors.ENDC} \n")
+              
+              registarLogs("sucesso",username,"registo_user","Registo de novo utilizador")
+              login()                   
+        
+    else:
+        print("\nPassword não é igual ao confirmado\n")
+        registar()
+                
+
+def registarUserAdmin():
+    totalUsers = User().contarUsers()
+    if totalUsers[0] == 0:
+        passwordHash = hashlib.sha256('1234'.encode('utf-8')).hexdigest()
+        user = User('007',passwordHash,'','admin')
+        user.insert()  
+
+def portScanner(user): 
+    print("\n--------------- << PORT SCANNER >> ---------------")
+    ip =input("Introduza o IP do alvo [ex: 192.168.1.128]: ") #192.168.1.128
+    portoInical = int(input("Porto inicial: "))
+    portoFim = int(input("Porto final: "))  
+    print("\n")
+    dataInicio = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    print("Inicio do Scanner:" + str(dataInicio))
+    print("IP alvo: " + ip)
+    print ("Processando, Por favor aguarde...")
+
+    try:
+        portos = []        
+        # Vai Scannear entre os portos introduzidos pelo utilizador
+        for porto in range(portoInical,portoFim):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            socket.setdefaulttimeout(1)
+            
+            result = s.connect_ex((ip,porto))
+            if result ==0:
+                portos.append(porto)
+                print(bcolors.WARNING+"Porto aberto: "+str(porto)+" "+bcolors.ENDC+"")
+            
+            s.close()
+        dataFim = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        print("Scanner ficou concluido em " + str(dataFim))
+        
+        opRel = input("\nGerar Relatorio PDF [y/n]: ")
+        if opRel =='y':
+            data = datetime.now()
+            conteudo = {'ip': ip, 'pi':portoInical,'pf':portoFim,'di':dataInicio, 'df': dataFim }
+            print("Processando, Por favor aguarde...")
+            sleep(1) 
+            #faz a criação do pdf            
+            gerarRelatorioPortScannerPDF("portScanner","Port Scanner",data, conteudo, portos)
+            print(f"{bcolors.OKGREEN}Relatorio gerado com sucesso{bcolors.ENDC} \n")
+            
+        #inseri os dados na Base de Dados
+        if len(portos) > 0:
+            portScanner = PortScanner(ip,str(portoInical),str(portoFim),"".join(str(portos)),dataInicio,dataFim)
+            res = portScanner.insert()
+            if res != 0:
+                print(f"{bcolors.OKGREEN}\nOs dados foram guardados na base de dados{bcolors.ENDC}")            
+        
+        registarLogs("sucesso",user[1],"portscanner","ip="+ip)
+              
+        voltarMenuOuLogout(user)        
+       
+    except socket.gaierror:
+            print("\n Hostname não pode ser resolvido !!!")
+            sys.exit()
+    except socket.error:
+            print("\ Servidor não responde !!!")
+            sys.exit()
+
+def gerarRelatorioPortScannerPDF(nomeFicheiro,titulo,data, conteudo, portos):
+     dataPadding = "_"+data.strftime("%Y%m%d%H%M")
+     pdf = canvas.Canvas(pathApp("relatorios/"+nomeFicheiro+dataPadding+".pdf"))
+     pdf.setLineWidth(.3)
+     pdf.setFont('Helvetica', 12)
+     pdf.drawString(500,750,data.strftime("%d/%m/%Y"))
+     pdf.setFont('Helvetica-Bold', 18)
+     pdf.drawString(200,735,'Relatorio '+titulo)
+     pdf.line(20,700,580,700)
+     pdf.setFont('Helvetica', 12)
+     pdf.drawString(20,650,"IP Alvo: "+str(conteudo['ip']))
+     pdf.drawString(300,650,"Portos ["+str(conteudo['pi'])+", "+str(conteudo['pf'])+"]")
+     pdf.drawString(20,630,"Inicio: "+str(conteudo['di']))
+     pdf.drawString(300,630,"Fim: "+str(conteudo['df']))
+     pdf.line(20,615,580,615)
+     pdf.setFont('Helvetica', 12)
+    
+     y = 600
+     i = 0
+     for linha in portos:
+        i = i +1
+        pdf.drawString(20, y, str(i)+". Porto aberto: "+str(linha))
+        y -= 25  
+        
+     pdf.setFont('Helvetica-Bold', 12)        
+     pdf.line(20,(y-20),580,(y-20))
+     if len(portos) == 1:
+         msg = str(len(portos))+ " porto aberto"
+     else:
+         msg = str(len(portos))+ " portos abertos"
+     pdf.drawString(20,(y-35),"Total: "+msg)
+                
+     pdf.save()
+
+   
+def logout(username):
+    print("\nTerminando a sessão...")
+    registarLogs("sucesso",username,"login","logout")
+      
+    sleep(1)
+    print("\nAdeus e Obrigado!")
+    sys.exit()
+
+
+def analiseLogServicos(user):
+    print("\n------- << ANALISE LOGS SERVIÇOS [HTTP/SSH] >> ---------\n")
+    ficheiro = input("Indique o ficheiro [caminho/ficheiro]: ") #'Desktop/ufw'
+    f = open(pathApp(ficheiro+".log",1))
+    linhas = f.readlines()
+    i=0
+    cabecalho = ['Dia','Mes','Hora','Ip SRC','Ip DST','Porto DST','Cidade','Pais']
+    dados = []
+    res = 0
+    for linha in linhas:
+        if 'DPT=443' in linha or 'DPT=80' in linha:
+            i = i + 1                
+            col = linha.split(' ')
+            mes = col[0]
+            dia = col[1]
+            hora = col[2]
+            ipSRC = col[11].replace('SRC=', '')
+            ipDST = col[12].replace('DST=', '')
+            dPort = col[21].replace('DPT=','')
+            
+            #passar o ip de origem para obter as informações das cidades
+            geoIp = GeoIpInfo(ipSRC)
+            cidade = geoIp.subdivisions.most_specific.name+" ("+geoIp.country.iso_code+")"
+            pais = geoIp.country.name
+            dados.append([dia,mes,hora,ipSRC,ipDST,dPort,cidade,pais])
+            
+             #inserindo os dados na Base de Dados
+            servicos = Servicos(str(dia),mes,str(hora),ipSRC,ipDST,str(dPort),cidade,pais)
+            res = servicos.insert()
+            
+    if res != 0:
+        print(f"{bcolors.OKGREEN}\nOs dados foram guardados na base de dados{bcolors.ENDC}")            
+    
+    registarLogs("sucesso",user[1],"analise_servico","Analises serviços http https ssh")
+    
+    #gerar ficheiro CSV dos serviços http https ssl 
+    gerarFicheiroCSV("servicos",cabecalho,dados)
+    op=""
+    while op != 3:
+        print("\n--------------------------------------------------")
+        print("[1] Gerar Relatorio PDF")
+        print("[2] Gerar grafico de Paises do IP de Origem [GeoIP]")
+        print("[3] Voltar para o Menu Principal")
+        
+        op = input(f"\n{bcolors.BOLD}>>> {bcolors.ENDC}")
+        if op =='1':
+            print("Processando, Por favor aguarde...")
+            sleep(1) 
+            #faz a criação do pdf            
+            gerarRelatorioLogServicosPDF(cabecalho,dados)
+            print(f"\n{bcolors.OKGREEN}Relatorio gerado com sucesso{bcolors.ENDC} \n")
+            registarLogs("sucesso",user[1],"relatorio","relatorio portscanner")
+        elif op == '2':
+            IPs = []
+            paises =[]
+            servicos = Servicos().selectIpSRCPorPais()
+            for s in servicos:
+                IPs.append(s[0])
+                paises.append(s[1])
+            
+            plt.bar(paises,IPs)
+            plt.title('Grafico de IP por paises de Origem')
+            plt.xlabel('Paises',fontsize=14)
+            plt.ylabel('IPs',fontsize=14)
+            plt.grid(True)
+            plt.show()
+            registarLogs("sucesso",user[1],"grafico","Grafico de IP por paises de Origem")
+        else:
+            menuPrincipal(user)
+         
+
+def gerarRelatorioLogServicosPDF(cabecalho, dados):
+     data = datetime.now()
+     pdf = canvas.Canvas(pathApp("relatorios/servicos.pdf"))
+     pdf.setPageSize(landscape(letter))
+     pdf.setLineWidth(.3)
+     pdf.setFont('Helvetica', 12)
+     pdf.drawString(700,570,data.strftime("%d/%m/%Y"))
+     pdf.setFont('Helvetica-Bold', 18)
+     pdf.drawString(220,550,'Relatorio Serviços Http Https e SSH')
+     pdf.line(20,530,770,530)
+     
+     pdf.setFont('Helvetica-Bold', 12)     
+     xCab = 20
+     i = 0
+     for c in cabecalho:
+        i = i +1
+        pdf.drawString(xCab, 500, c)
+        xCab += 100 
+     
+     y = 480   
+     pdf.setFont('Helvetica', 12)        
+     for celulas in dados:
+         x = 20
+         for c in celulas:
+             pdf.drawString(x,y,c)
+             x += 100 
+         y -= 25
+     pdf.save()
+ 
+ 
+def analiseLogsAuth(user):
+    print("\n-------- << ANALISE LOG AUTH.LOG >> -----------\n")
+    f = open(pathApp("logs/auth.log"))
+    linhas = f.readlines()
+    i=0
+    cabecalho = ['Dia','Mes','Hora','IP','Porto','Cidade','Pais']
+    dados = []
+    res = 0
+    re_ip = re.compile("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+    print("Processando, Por favor aguarde...")
+            
+    for linha in linhas:
+        if 'Failed password' in linha:
+            i = i + 1                
+            col = linha.split(' ')
+            mes = col[0]
+            dia = col[1]
+            hora = col[2]
+            ip = "".join(re.findall(re_ip,linha))
+            re_porto = re.search('port\s(\w+)',linha)
+            porto = re_porto.group(1)
+            
+            #passar o ip de origem para obter as informações das cidades
+            geoIp = GeoIpInfo(str(ip))
+            cidade = str(geoIp.city.name)+" ("+str(geoIp.country.iso_code)+")"
+            pais = geoIp.country.name
+            dados.append([dia,mes,hora,ip,porto,cidade,pais])
+            
+            print(str(dia)+" "+mes+" "+hora+" "+ip+" "+porto+" "+cidade+" "+pais)
+                        
+            #inserindo os dados na Base de Dados
+            loginfalhados = Loginfalhados(str(dia),mes,str(hora),ip,str(porto),cidade,pais)
+            res = loginfalhados.insert()
+            
+    if res != 0:
+       print(f"{bcolors.OKGREEN}\nOs dados foram guardados na base de dados{bcolors.ENDC}")            
+    
+    registarLogs("sucesso",user[1],"analise_log_auth","Analise dos logs, filtragem dos logins falhados")
+       
+    #gerar ficheiro CSV dos login falhados 
+    gerarFicheiroCSV("loginfalhados",cabecalho,dados)
+    op=""
+    while op != 3:
+        print("\n------------------------------------------------")
+        print("[1] Gerar Relatorio PDF")
+        print("[2] Grafico de IP dos Login Falhados por Paises de origem [GeoIP]")
+        print("[3] Voltar para o Menu Principal")
+        
+        op = input(f"\n{bcolors.BOLD}>>> {bcolors.ENDC}")
+        if op =='1':
+            print("Processando, Por favor aguarde...")
+            sleep(1) 
+            #faz a criação do pdf            
+            gerarRelatorioLoginFalhadoPDF(cabecalho,dados)
+            print(f"\n{bcolors.OKGREEN}Relatorio gerado com sucesso{bcolors.ENDC} \n")
+            registarLogs("sucesso",user[1],"relatorio","relatorios dos logins falhados")
+  
+        elif op == '2':
+            IPs = []
+            paises =[]
+            loginfalhados = Loginfalhados().selectIpLoginFalhadoPorPaises()
+            for s in loginfalhados:
+                IPs.append(s[0])
+                paises.append(s[1])
+            
+            plt.barh(paises,IPs)
+            plt.title('Grafico de IP dos Login Falhados por Paises de origem')
+            plt.xlabel('IPs',fontsize=14)
+            plt.ylabel('Paises',fontsize=14)
+            plt.grid(True)
+            plt.show()
+            registarLogs("sucesso",user[1],"grafico","Grafico de IP dos Login Falhados por Paises de origem")
+        else:
+            menuPrincipal(user)
+
+def gerarRelatorioLoginFalhadoPDF(cabecalho, dados):
+     data = datetime.now()
+     pdf = canvas.Canvas(pathApp("relatorios/loginfalhados.pdf"))
+     pdf.setPageSize(landscape(letter))
+     pdf.setLineWidth(.3)
+     pdf.setFont('Helvetica', 12)
+     pdf.drawString(700,570,data.strftime("%d/%m/%Y"))
+     pdf.setFont('Helvetica-Bold', 18)
+     pdf.drawString(220,550,'Relatorio de Login Falhados')
+     pdf.line(20,530,770,530)
+     
+     pdf.setFont('Helvetica-Bold', 12)     
+     xCab = 20
+     i = 0
+     for c in cabecalho:
+        i = i +1
+        pdf.drawString(xCab, 500, c)
+        xCab += 100 
+     
+     y = 480   
+     pdf.setFont('Helvetica', 12)        
+     for celulas in dados:
+         x = 20
+         for c in celulas:
+             pdf.drawString(x,y,c)
+             x += 100 
+         y -= 25
+     pdf.save()
+
+def gerarFicheiroCSV(ficheiro,cabecalho,dados):
+ with open(pathApp("relatorios/"+ficheiro+".csv"), 'w', encoding='UTF8', newline='') as f:
+    writer = csv.writer(f)
+
+    #escrever cabecalho
+    writer.writerow(cabecalho)
+
+    #escrever dados
+    for dado in dados:
+        writer.writerow(dado)
+
+
+def GeoIpInfo(ip):
+    reader = geoip2.database.Reader(pathApp('/utils/GeoLite2-City.mmdb'))
+    return reader.city(ip)
+
+def backup(user):
+   print("\n------------------ << BACKUP >> ------------------")
+   dirAlvo = input('Diretoria Alvo do backup: ') 
+   dirAlvo = os.path.join(os.path.join(os.path.expanduser('~')), dirAlvo);
+   
+   if not os.path.exists(os.path.join(os.path.join(os.path.expanduser('~')),'Desktop/backups')):
+        os.makedirs(os.path.join(os.path.join(os.path.expanduser('~')),'Desktop/backups'))
+   nomeFicheiro = "backup"+datetime.now().strftime("%d%m%Y%H%M%S")
+   ficheiroBackup = os.path.join(os.path.join(os.path.expanduser('~')), "Desktop/backups/"+nomeFicheiro);
+   
+   print ("Processando, Por favor aguarde...")
+   shutil.make_archive(ficheiroBackup,'zip',dirAlvo)
+   
+   #revoga permissao de acesso ao ficheiro para o grupo e outros. Apenas o dono (owner) pode aceder
+   os.chmod(ficheiroBackup+".zip",stat.S_IRWXG | stat.S_IRWXO)
+   
+   print(f"\n{bcolors.OKGREEN}Backup efetuado com sucesso{bcolors.ENDC} \n")
+   print("Nome ficheiro: "+bcolors.BOLD+nomeFicheiro+".zip"+bcolors.ENDC)
+   print("Localização: "+bcolors.BOLD+"Desktop/backups\n"+bcolors.ENDC)
+   
+   registarLogs("sucesso",user[1],"backup","dirOrg="+dirAlvo+" fname="+nomeFicheiro)
+       
+   voltarMenuOuLogout(user)
+
+def submenuChat(user):
+    print("\n-------------------- << CHAT >> --------------------")    
+    print("[1] LISTAR MINHAS MENSAGENS")
+    print("[2] APAGAR MINHAS MENSAGENS")
+    print("[3] INICIAR CONVERSA")
+    print("[4] VOLTAR AO MENU PRINCIPAL")
+    print("[S] SAIR")    
+    
+    op = input(f"\n{bcolors.BOLD}>>> {bcolors.ENDC}")
+    if op == '1':
+          listarMsgChat(user)
+    elif op == '2':
+          apagarMsgChat(user)
+    elif op == '3':
+          init = initCliente(user[1])
+          if init == 0:
+             submenuChat(user)
+    elif op == '4':
+        menuPrincipal(user)
+    elif op.lower() == 's':
+        logout(user[1])
+    else:
+        print("Opcção Invalida!")
+        submenuChat(user)
+
+def listarMsgChat(user):
+    print ("\nProcessando, Por favor aguarde...")
+    rsa = RSACrifra() 
+    if user[3] =="":
+        ficheiro = input("\nIntroduza o ficheiro da chave privada: ") 
+        try:
+            privKey = rsa.lerChavePEM(ficheiro)
+        except FileNotFoundError:
+            print("Ficheiro não encontrado")
+            submenuChat(user)
+                  
+        op = input("Guardar localização da chave para futuras utilizações?[y/n]: ")
+        if op == 'y':
+            res =User().guardarPrivKey(ficheiro,user[1])
+            if res != 0:
+                print(f'\n{bcolors.OKGREEN}Localizacao da chave foi guardada com sucesso{bcolors.ENDC}\n')
+    else:
+        privKey = rsa.lerChavePEM(user[3])
+        
+    mensagens = Mensagem().selectAll('user',user[1],str(1))
+    i=0
+    concatMsg =""
+    for m in mensagens:
+       texto = rsa.decifrar(privKey,base64.b64decode(m[2].encode('ascii')))
+       i = i +1
+       print(" - "+m[1]+" >> "+bcolors.BOLD+str(i)+texto.decode()+bcolors.ENDC)
+       concatMsg += str(i)+" - "+m[1]+" >> "+texto.decode()+"\n"
+       
+    registarLogs("sucesso",user[1],"chat_list","Listagem das mensagem da base de daos")
+    
+    # mostra esta opcao se tiver pelo menos uma mensagem
+    if i > 0:
+        op =input("\nFazer download das mensagens listadas? [y/n]: ")
+        if op == 'y':
+            caminho = input('Introduza o caminho para guardar o ficheiro: ')
+            f = open(pathApp(caminho+"/msgChat_"+user[1]+".txt",1), 'a')
+            f.write(concatMsg)
+            f.close()
+            sleep(1)
+            print(f'\n{bcolors.OKGREEN}Download efetuado com sucesso{bcolors.ENDC}\n')
+            print(f'{bcolors.OKGREEN}Nome ficheiro: msgChat_{user[1]}.txt{bcolors.ENDC}\n')
+    
+            registarLogs("sucesso",user[1],"chat_down","Download msg  dirDes="+caminho)
+    
+    else:
+        print("\nNenhuma mensagem foi encontrada")
+        
+    op =input("\nDesejas efetuar mais operações? [y/n]: ")
+    if op == 'y':
+        submenuChat(user)
+    else:
+        logout(user[1])
+
+def apagarMsgChat(user):
+    op =input("\nEliminar todas as mensagens? [y/n]: ")
+    if op == 'y':
+      delMsg = Mensagem().delete(user[1])
+      if delMsg != 0 :
+          print(f'{bcolors.OKGREEN}Mensagens eliminadas com sucesso{bcolors.ENDC}\n')
+          registarLogs("sucesso",user[1],"chat_msg_del","Eliminação das mensagens")
+    else:
+        print("Operação cancelada")
+        registarLogs("sucesso",user[1],"chat_msg_del","Tentativa de eliminação das mensagens")
+        
+    op =input("\nDesejas efetuar mais operações? [y/n]: ")
+    if op == 'y':
+        submenuChat(user)
+    else:
+        logout(user[1])
+
+def registarLogs(flag,user,operacao,descricao):
+   data = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+   f = open(pathApp('logs/logApp.log'), 'a')
+   
+   log = data+" ["+flag+"]: op="+operacao+" user="+user+" descr="+descricao+"\n"   
+   f.write(log)
+   
+   f.close()
+
+def pathApp(ficheiro, flag=0):
+    pathParte = "Desktop/LPD/lpdpython/aplicacao/"+ficheiro;
+    if flag == 0:
+        path = os.path.join(os.path.join(os.path.expanduser('~')),pathParte)
+    else:
+        path = os.path.join(os.path.join(os.path.expanduser('~')),ficheiro)
+    return path
+   
+       
+def menuPrincipal(user):
+     clearScreen()
+     tipoUser=user[4]
+     sufx = "(admin)" if tipoUser=='admin' else ""
+     print('\n=====================================================')
+     print("\nUtilizador Logado: "+bcolors.BOLD+user[1]+sufx+bcolors.ENDC)
+     print("\n--------- << M E N U  P R I N C I P A L >> ----------\n")
+     if tipoUser == 'admin':
+        print("[1] PORT SCANNER")
+        print("[2] ANALISE LOGS SERVIÇOS [HTTP/SSH]")
+        print("[3] ANALISE LOGS [auth.log]")
+        print("[4] LIGAÇÕES")
+        print("[5] BACKUP")
+        print("[6] CHAT [INICIAR O SERVIDOR]")
+     else:
+        print("[C] CHAT") #cliente
+     print("[S] SAIR")
+
+     op = input(f"\n{bcolors.BOLD}>>> {bcolors.ENDC}")
+     if op == '1' and tipoUser == 'admin':
+          portScanner(user)
+     elif op == '2' and tipoUser == 'admin':
+          analiseLogServicos(user)
+     elif op == '3' and tipoUser == 'admin':
+          analiseLogsAuth(user)
+     elif op == '4' and tipoUser == 'admin':
+         ligacoes(user)
+     elif op == '5' and tipoUser == 'admin':
+         backup(user)
+     elif op == '6' and tipoUser == 'admin':
+         initServidor()
+     elif op.lower() == 'c':
+         submenuChat(user)         
+     elif op.lower() == 's':
+          logout(user[1])
+     else:
+         print ("Opção invalida") 
+ 
+def ligacoes(user):
+    print("\n------------------ << LIGAÇÕES >> ------------------")   
+    dados = [] 
+    resultados = os.popen('netstat -at -au')
+    i=0
+    for res in resultados.readlines():
+        if i > 0:
+            print(bcolors.BOLD+res+bcolors.ENDC)
+            dados.append(res)
+        i+=1
+    registarLogs("sucesso",user[1],"list","listagem de ligações")    
+    op = input('\nGerar relatorio PDF [y/n]:')
+    if op == 'y':
+        print('Processando, aguarde por favor...')
+        sleep(1)
+        gerarRelatorioLigacaoPDF("ligacoes","Ligações",dados)
+        registarLogs("sucesso",user[1],"relatorio","relatorio ligações")
+        print(f"{bcolors.OKGREEN}Relatorio gerado com sucesso{bcolors.ENDC} \n")
+    
+    voltarMenuOuLogout(user)
+     
+def gerarRelatorioLigacaoPDF(nomeFicheiro, titulo, dados):
+    data = datetime.now()
+    dataPadding = "_"+data.strftime("%Y%m%d%H%M")
+    pdf = canvas.Canvas(pathApp("relatorios/"+nomeFicheiro+dataPadding+".pdf"))
+    pdf.setLineWidth(.3)
+    pdf.setFont('Helvetica-Bold', 16)
+    pdf.drawString(200,735, 'Relatorio '+ titulo)
+    pdf.drawString(500,750,data.strftime("%d/%m/%Y"))     
+    pdf.line(20,700,580,700)
+    pdf.setFont('Helvetica', 12)
+    y = 680
+    x = 0
+    for d in dados:
+         pdf.drawString(20, y, str(d))
+         y -= 25
+      
+    pdf.line(20, (y-20), 580, (y-20))
+    pdf.save()
+    
+def voltarMenuOuLogout(user):
+     op = input(f"{bcolors.BOLD}\nDesejas voltar para o Menu Principal [y/n]: {bcolors.ENDC}")
+     if op.lower()=='y':
+        menuPrincipal(user)
+     else:
+        logout(user[1]) 
+
+
+def clearScreen():
+    if name == 'int':
+        _ = system('cls')
+  
+    else:
+        _ = system('clear')
+
+     
+def main():
+    msg = pyfiglet.figlet_format("LPD - PYTHON")
+    print(msg)
+    print("**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**") 
+    print(f"|{bcolors.OKBLUE}          INSTITUTO POLITÉCNICO DE BEJA{bcolors.ENDC}            |")
+    print(f"|{bcolors.OKBLUE}             M E S I  2 0 2 1  -  2 2{bcolors.ENDC}              |")
+    print(f"|{bcolors.OKBLUE}        Linguagem de Programação Dinâmicas{bcolors.ENDC}         |")
+    print("|---------------------------------------------------|")
+    print(f"|{bcolors.BOLD}    A P L I C A Ç Ã O   D E   S E G U R A N Ç A{bcolors.ENDC}    |")     
+    print("|---------------------------------------------------|")
+    print("|        Aluno: Wilton Martins  Nª: 22272          |")
+    print("**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**-**") 
+
+    try:
+        #regista o user admin na base de dados
+        registarUserAdmin()
+        loginOuRegistar()
+    except KeyboardInterrupt:
+        print("\nPrograma interrompido abrupta !!!!")
+        sys.exit()
+
+main()
